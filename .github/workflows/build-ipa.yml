@@ -20,6 +20,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
 
       - name: Install SwiftLint 0.63.3
         run: |
@@ -72,6 +74,30 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Building Opaline $VERSION"
 
+      - name: Determine release tag
+        id: release
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            RELEASE_TAG="${GITHUB_REF#refs/tags/}"
+            SHOULD_RELEASE="true"
+          elif [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            RELEASE_TAG="v${{ steps.version.outputs.version }}-build.${{ github.run_number }}"
+            SHOULD_RELEASE="true"
+          else
+            RELEASE_TAG=""
+            SHOULD_RELEASE="false"
+          fi
+
+          echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "should_release=$SHOULD_RELEASE" >> "$GITHUB_OUTPUT"
+
+          if [ "$SHOULD_RELEASE" = "true" ]; then
+            echo "Release tag: $RELEASE_TAG"
+          else
+            echo "This build will not create a release"
+          fi
+
       - name: Build IPA
         env:
           IPA_VERSION: ${{ steps.version.outputs.version }}
@@ -82,15 +108,26 @@ jobs:
           chmod +x make_ipa.sh
           ./make_ipa.sh
 
-      - name: Verify generated IPA
+      - name: Find generated IPA
+        id: ipa
         shell: bash
         run: |
-          IPA_FILE=$(find . -maxdepth 1 -name "*.ipa" -print -quit)
+          IPA_FILE=$(find "$GITHUB_WORKSPACE" \
+            -maxdepth 1 \
+            -type f \
+            -name "*.ipa" \
+            -print \
+            -quit)
 
           if [ -z "$IPA_FILE" ]; then
             echo "No IPA file was generated"
             exit 1
           fi
+
+          IPA_NAME=$(basename "$IPA_FILE")
+
+          echo "path=$IPA_FILE" >> "$GITHUB_OUTPUT"
+          echo "name=$IPA_NAME" >> "$GITHUB_OUTPUT"
 
           echo "Generated IPA:"
           ls -lh "$IPA_FILE"
@@ -98,19 +135,53 @@ jobs:
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Opaline-${{ steps.version.outputs.version }}
-          path: "*.ipa"
+          name: Opaline-${{ steps.version.outputs.version }}-${{ github.run_number }}
+          path: ${{ steps.ipa.outputs.path }}
           if-no-files-found: error
           retention-days: 30
 
-      - name: Create GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: "*.ipa"
-          generate_release_notes: true
-          fail_on_unmatched_files: true
-          name: Opaline ${{ github.ref_name }}
-          tag_name: ${{ github.ref_name }}
+      - name: Create release tag
+        if: steps.release.outputs.should_release == 'true' && github.event_name == 'workflow_dispatch'
+        shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git tag "$RELEASE_TAG" "$GITHUB_SHA"
+          git push origin "$RELEASE_TAG"
+
+      - name: Create GitHub Release
+        if: steps.release.outputs.should_release == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          IPA_FILE: ${{ steps.ipa.outputs.path }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          gh release create "$RELEASE_TAG" \
+            "$IPA_FILE" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Opaline $RELEASE_TAG" \
+            --generate-notes \
+            --verify-tag
+
+      - name: Build summary
+        shell: bash
+        run: |
+          {
+            echo "## Opaline Build"
+            echo ""
+            echo "- Version: \`${{ steps.version.outputs.version }}\`"
+            echo "- Build: \`${{ github.run_number }}\`"
+            echo "- IPA: \`${{ steps.ipa.outputs.name }}\`"
+
+            if [ "${{ steps.release.outputs.should_release }}" = "true" ]; then
+              echo "- Release: \`${{ steps.release.outputs.tag }}\`"
+            else
+              echo "- Release: not created"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
