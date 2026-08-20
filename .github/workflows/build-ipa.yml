@@ -1,0 +1,85 @@
+name: Build Opaline IPA
+
+on:
+  workflow_dispatch:
+
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    name: Build IPA
+    runs-on: macos-15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Install SwiftLint 0.63.3
+        run: |
+          curl -sL \
+            -o "$RUNNER_TEMP/swiftlint.zip" \
+            "https://github.com/realm/SwiftLint/releases/download/0.63.3/portable_swiftlint.zip"
+
+          unzip -oq \
+            "$RUNNER_TEMP/swiftlint.zip" \
+            -d "$RUNNER_TEMP/swiftlint"
+
+          sudo install \
+            -m 755 \
+            "$RUNNER_TEMP/swiftlint/swiftlint" \
+            "$(brew --prefix)/bin/swiftlint"
+
+          swiftlint version
+
+      - name: Install ldid-procursus
+        run: |
+          brew unlink ldid 2>/dev/null || true
+          brew install ldid-procursus
+
+          ldid 2>&1 | head -1 || true
+
+      - name: Configure build
+        run: |
+          cp Config/Local.xcconfig.example Config/Local.xcconfig
+
+          sed -i '' '/^APP_MANIFEST_URL/d' Config/Local.xcconfig
+
+          printf \
+            'APP_MANIFEST_URL = https:/$()/raw.githubusercontent.com/%s/main/source/apps.json\n' \
+            "$GITHUB_REPOSITORY" \
+            >> Config/Local.xcconfig
+
+      - name: Get version
+        id: version
+        run: |
+          VERSION=$(sed -n \
+            's/.*MARKETING_VERSION = \([^;]*\);.*/\1/p' \
+            Opaline.xcodeproj/project.pbxproj | head -1)
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+          echo "Building Opaline $VERSION"
+
+      - name: Build IPA
+        env:
+          IPA_VERSION: ${{ steps.version.outputs.version }}
+          BUILD_NUMBER: ${{ github.run_number }}
+          UPDATE_SOURCE: "0"
+          XCODEBUILD_EXTRA_ARGS: CODE_SIGNING_ALLOWED=NO
+        run: |
+          chmod +x make_ipa.sh
+          ./make_ipa.sh
+
+      - name: Show generated IPA
+        run: |
+          ls -lh *.ipa
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Opaline-${{ steps.version.outputs.version }}
+          path: "*.ipa"
+          if-no-files-found: error
+          retention-days: 30
